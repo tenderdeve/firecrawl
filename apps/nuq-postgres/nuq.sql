@@ -74,6 +74,13 @@ CREATE INDEX IF NOT EXISTS nuq_queue_scrape_queued_optimal_2_idx ON nuq.queue_sc
 CREATE INDEX IF NOT EXISTS nuq_queue_scrape_failed_created_at_idx ON nuq.queue_scrape USING btree (created_at) WHERE (status = 'failed'::nuq.job_status);
 CREATE INDEX IF NOT EXISTS nuq_queue_scrape_completed_created_at_idx ON nuq.queue_scrape USING btree (created_at) WHERE (status = 'completed'::nuq.job_status);
 
+-- Predicate-matching partial indexes for the standalone (group_id IS NULL)
+-- cleaners. In production virtually every row has a group_id, so these
+-- indexes stay tiny and turn the standalone cleaners into fast no-ops instead
+-- of seq scans over the whole 18M-row table.
+CREATE INDEX IF NOT EXISTS nuq_queue_scrape_completed_standalone_created_at_idx ON nuq.queue_scrape USING btree (created_at) WHERE (status = 'completed'::nuq.job_status AND group_id IS NULL);
+CREATE INDEX IF NOT EXISTS nuq_queue_scrape_failed_standalone_created_at_idx ON nuq.queue_scrape USING btree (created_at) WHERE (status = 'failed'::nuq.job_status AND group_id IS NULL);
+
 -- Indexes for crawl-status.ts queries
 -- For getGroupAnyJob: query by group_id, owner_id, and data->>'mode' = 'single_urls'
 CREATE INDEX IF NOT EXISTS nuq_queue_scrape_group_owner_mode_idx ON nuq.queue_scrape (group_id, owner_id) WHERE ((data->>'mode') = 'single_urls');
@@ -195,6 +202,11 @@ CREATE INDEX IF NOT EXISTS nuq_queue_crawl_finished_queued_optimal_2_idx ON nuq.
 CREATE INDEX IF NOT EXISTS nuq_queue_crawl_finished_failed_created_at_idx ON nuq.queue_crawl_finished USING btree (created_at) WHERE (status = 'failed'::nuq.job_status);
 CREATE INDEX IF NOT EXISTS nuq_queue_crawl_finished_completed_created_at_idx ON nuq.queue_crawl_finished USING btree (created_at) WHERE (status = 'completed'::nuq.job_status);
 
+-- Predicate-matching partial indexes for the standalone (group_id IS NULL)
+-- cleaners; see note on queue_scrape above.
+CREATE INDEX IF NOT EXISTS nuq_queue_crawl_finished_completed_standalone_created_at_idx ON nuq.queue_crawl_finished USING btree (created_at) WHERE (status = 'completed'::nuq.job_status AND group_id IS NULL);
+CREATE INDEX IF NOT EXISTS nuq_queue_crawl_finished_failed_standalone_created_at_idx ON nuq.queue_crawl_finished USING btree (created_at) WHERE (status = 'failed'::nuq.job_status AND group_id IS NULL);
+
 SELECT cron.schedule('nuq_queue_crawl_finished_clean_completed', '*/5 * * * *', $$
   DELETE FROM nuq.queue_crawl_finished WHERE nuq.queue_crawl_finished.status = 'completed'::nuq.job_status AND nuq.queue_crawl_finished.created_at < now() - interval '1 hour' AND group_id IS NULL;
 $$);
@@ -255,13 +267,25 @@ SELECT cron.schedule('nuq_group_crawl_finished', '15 seconds', $$
   FROM finished_groups;
 $$);
 
+-- Batched group cleanup: cap each run at 10000 groups to keep the cascading
+-- deletes (queue_scrape, queue_scrape_backlog, queue_crawl_finished) bounded
+-- and stop them from outrunning the 5min schedule. With p95 ~23 jobs/group
+-- this caps a run at ~230k row deletes; max-case (8495 jobs/group) is rare
+-- enough that statement_timeout=4min is the backstop. SKIP LOCKED keeps
+-- overlapping runs from blocking each other if a slot ever runs long.
 SELECT cron.schedule('nuq_group_crawl_clean', '*/5 * * * *', $$
   SET statement_timeout = '4min';
-  WITH cleaned_groups AS (
+  WITH victims AS (
+    SELECT id FROM nuq.group_crawl
+    WHERE status = 'completed'::nuq.group_status
+      AND expires_at < now()
+    ORDER BY expires_at
+    LIMIT 10000
+    FOR UPDATE SKIP LOCKED
+  ), cleaned_groups AS (
     DELETE FROM nuq.group_crawl
-    WHERE nuq.group_crawl.status = 'completed'::nuq.group_status
-      AND nuq.group_crawl.expires_at < now()
-    RETURNING *
+    WHERE id IN (SELECT id FROM victims)
+    RETURNING id
   ), cleaned_jobs_queue_scrape AS (
     DELETE FROM nuq.queue_scrape
     WHERE nuq.queue_scrape.group_id IN (SELECT id FROM cleaned_groups)
