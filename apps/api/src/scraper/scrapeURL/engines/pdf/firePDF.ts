@@ -52,7 +52,11 @@ export async function scrapePDFWithFirePDF(
 
   if (!maxPages && !meta.internalOptions.zeroDataRetention) {
     try {
-      const cached = await getPdfResultFromCache(base64Content, "firepdf");
+      const cached = await getPdfResultFromCache(
+        base64Content,
+        "firepdf",
+        mode,
+      );
       if (cached) {
         logger.info("Using cached FirePDF result", {
           scrapeId: meta.id,
@@ -158,7 +162,12 @@ export async function scrapePDFWithFirePDF(
 
   if (!maxPages && !meta.internalOptions.zeroDataRetention) {
     try {
-      await savePdfResultToCache(base64Content, processorResult, "firepdf");
+      await savePdfResultToCache(
+        base64Content,
+        processorResult,
+        "firepdf",
+        mode,
+      );
     } catch (error) {
       logger.warn("Error saving FirePDF result to cache", { error });
     }
