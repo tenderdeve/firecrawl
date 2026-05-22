@@ -132,6 +132,18 @@ export async function scrapeInteractController(
     method: "scrapeInteractController",
   });
 
+  // Interactive browser sessions are tracked in Supabase, so the endpoint
+  // cannot work on self-hosted deployments that run without DB authentication.
+  // Return a clear error instead of the opaque "Supabase RR client is not
+  // configured." that bubbles up from the first DB lookup below.
+  if (config.USE_DB_AUTHENTICATION !== true) {
+    return res.status(503).json({
+      success: false,
+      error:
+        "The interact endpoint requires database authentication and is unavailable on self-hosted deployments.",
+    });
+  }
+
   // --- Validate scrape ownership ---
 
   const scrape = (await supabaseGetScrapeById(
@@ -367,6 +379,16 @@ export async function scrapeStopInteractiveBrowserController(
     module: "api/v2",
     method: "scrapeStopInteractiveBrowserController",
   });
+
+  // Mirrors the POST handler: browser sessions live in Supabase, so this is a
+  // no-op on self-hosted deployments without DB authentication.
+  if (config.USE_DB_AUTHENTICATION !== true) {
+    return res.status(503).json({
+      success: false,
+      error:
+        "The interact endpoint requires database authentication and is unavailable on self-hosted deployments.",
+    });
+  }
 
   const session = await getBrowserSessionFromScrape(req.params.jobId);
 
